@@ -2,7 +2,6 @@ package com.example.springboot.profile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -24,8 +23,8 @@ class ProfileHolderTest {
 
 	@Test
 	void installingAVersionClosesThePreviousOne() {
-		assertThat(this.holder.install(profile(1, "a"))).hasValue(1);
-		assertThat(this.holder.install(profile(2, "b"))).hasValue(2);
+		assertThat(this.holder.install(profile(1, "a"))).isEqualTo(1);
+		assertThat(this.holder.install(profile(2, "b"))).isEqualTo(2);
 
 		assertThat(this.compiler.compiled().get(0).isClosed()).isTrue();
 		assertThat(this.compiler.compiled().get(1).isClosed()).isFalse();
@@ -45,26 +44,24 @@ class ProfileHolderTest {
 			}).orElseThrow());
 		assertThat(scanning.await(5, TimeUnit.SECONDS)).isTrue();
 
-		CompletableFuture<OptionalLong> install = CompletableFuture.supplyAsync(() -> this.holder.install(profile(2, "a")));
+		CompletableFuture<Long> install = CompletableFuture.supplyAsync(() -> this.holder.install(profile(2, "a")));
 		Thread.sleep(200);
 		assertThat(install).isNotDone();
 		assertThat(this.compiler.compiled().get(0).isClosed()).isFalse();
 
 		release.countDown();
 		assertThat(scan).succeedsWithin(5, TimeUnit.SECONDS).isEqualTo(List.of(1L));
-		assertThat(install).succeedsWithin(5, TimeUnit.SECONDS).isEqualTo(OptionalLong.of(2));
+		assertThat(install).succeedsWithin(5, TimeUnit.SECONDS).isEqualTo(2L);
 		assertThat(this.compiler.compiled().get(0).isClosed()).isTrue();
 	}
 
 	@Test
-	void retiringClosesTheActiveVersionAndRefusesFurtherInstalls() {
+	void closingClosesTheActiveVersion() {
 		this.holder.install(profile(1, "a"));
-		this.holder.retire();
+		this.holder.close();
 
 		assertThat(this.compiler.compiled().get(0).isClosed()).isTrue();
 		assertThat(this.holder.read((profile, version) -> version)).isEmpty();
-		assertThat(this.holder.install(profile(2, "b"))).isEmpty();
-		assertThat(this.compiler.compiled().get(1).isClosed()).isFalse();
 	}
 
 	private CompiledProfile profile(long id, String expression) {

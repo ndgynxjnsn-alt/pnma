@@ -2,12 +2,8 @@ package com.example.springboot.profile;
 
 import java.util.HashSet;
 import java.util.List;
-import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.regex.Pattern;
 
 import com.example.springboot.hyperscan.PatternCompileException;
 import com.example.springboot.scan.ScanExecutorService;
@@ -17,9 +13,7 @@ import org.springframework.stereotype.Service;
 @Service
 public class ProfileService implements DisposableBean {
 
-	private static final Pattern NAME = Pattern.compile("[A-Za-z0-9._-]{1,64}");
-
-	private final ConcurrentMap<String, ProfileHolder> profiles = new ConcurrentHashMap<>();
+	private final ProfileHolder holder = new ProfileHolder();
 
 	private final MatcherCompiler compiler;
 
@@ -31,63 +25,35 @@ public class ProfileService implements DisposableBean {
 	}
 
 	/**
-	 * Compiles {@code patterns} and atomically replaces the profile's active version with it.
-	 * Scans already running against the previous version finish on that version.
+	 * Compiles {@code patterns} and atomically replaces the active database with it. Scans
+	 * already running against the previous version finish on that version.
 	 */
-	public ProfileInfo save(String name, List<PatternDefinition> patterns) {
-		validate(name, patterns);
+	public ProfileInfo save(List<PatternDefinition> patterns) {
+		validate(patterns);
 		// Compile before touching the holder: this is the slow part and must not block scans.
 		CompiledProfile compiled = new CompiledProfile(patterns, compile(patterns));
-		while (true) {
-			ProfileHolder holder = this.profiles.computeIfAbsent(name, (key) -> new ProfileHolder());
-			OptionalLong version = holder.install(compiled);
-			if (version.isPresent()) {
-				return new ProfileInfo(name, version.getAsLong(), compiled.patterns());
-			}
-			// The holder was deleted concurrently and is no longer mapped; retry with a fresh one.
-		}
+		long version = this.holder.install(compiled);
+		return new ProfileInfo(version, compiled.patterns());
 	}
 
-	public ProfileInfo get(String name) {
-		return holder(name).read((profile, version) -> new ProfileInfo(name, version, profile.patterns()))
-			.orElseThrow(() -> new ProfileNotFoundException(name));
-	}
-
-	/** @return whether the profile existed */
-	public boolean delete(String name) {
-		ProfileHolder holder = this.profiles.remove(name);
-		if (holder == null) {
-			return false;
-		}
-		holder.retire();
-		return true;
+	public ProfileInfo get() {
+		return this.holder.read((profile, version) -> new ProfileInfo(version, profile.patterns()))
+			.orElseThrow(NoProfileException::new);
 	}
 
 	/**
-	 * Scans {@code content} with the profile's current version on the scan executor. Fails with
-	 * {@link ProfileNotFoundException} if the profile does not exist (or is deleted before the
-	 * scan starts).
+	 * Scans {@code content} with the active database on the scan executor. Fails with
+	 * {@link NoProfileException} if no profile has been saved yet.
 	 */
-	public CompletableFuture<ScanResult> scan(String name, byte[] content) {
-		if (!this.profiles.containsKey(name)) {
-			return CompletableFuture.failedFuture(new ProfileNotFoundException(name));
-		}
-		return this.executor.submitScan(() -> holder(name)
-			.read((profile, version) -> new ScanResult(name, version, profile.scan(content)))
-			.orElseThrow(() -> new ProfileNotFoundException(name)));
+	public CompletableFuture<ScanResult> scan(byte[] content) {
+		return this.executor.submitScan(() -> this.holder
+			.read((profile, version) -> new ScanResult(version, profile.scan(content)))
+			.orElseThrow(NoProfileException::new));
 	}
 
 	@Override
 	public void destroy() {
-		this.profiles.keySet().forEach(this::delete);
-	}
-
-	private ProfileHolder holder(String name) {
-		ProfileHolder holder = this.profiles.get(name);
-		if (holder == null) {
-			throw new ProfileNotFoundException(name);
-		}
-		return holder;
+		this.holder.close();
 	}
 
 	private PatternMatcher compile(List<PatternDefinition> patterns) {
@@ -102,10 +68,7 @@ public class ProfileService implements DisposableBean {
 		}
 	}
 
-	private static void validate(String name, List<PatternDefinition> patterns) {
-		if (name == null || !NAME.matcher(name).matches()) {
-			throw new InvalidProfileException("Profile name must match " + NAME.pattern());
-		}
+	private static void validate(List<PatternDefinition> patterns) {
 		if (patterns == null || patterns.isEmpty()) {
 			throw new InvalidProfileException("A profile needs at least one pattern");
 		}

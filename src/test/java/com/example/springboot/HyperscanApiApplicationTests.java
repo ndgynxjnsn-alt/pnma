@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.IntStream;
 
+import com.example.springboot.profile.ProfileInfo;
 import com.example.springboot.profile.ScanResult;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,21 +26,22 @@ class HyperscanApiApplicationTests {
 
 	@Test
 	void savesAProfileAndScansContent() {
-		save("e2e", Map.of("id", 3141592653L, "expression", "secret-[0-9]{4}"),
+		long first = save(Map.of("id", 3141592653L, "expression", "secret-[0-9]{4}"),
 				Map.of("id", 27182818L, "expression", "PASSWORD", "flags", List.of("CASELESS")),
 				Map.of("id", 1L, "expression", "never"));
 
-		assertThat(scan("e2e", "my password is secret-1234")).isEqualTo(
-				new ScanResult("e2e", 1, List.of(27182818L, 3141592653L)));
+		assertThat(scan("my password is secret-1234"))
+			.isEqualTo(new ScanResult(first, List.of(27182818L, 3141592653L)));
 
-		save("e2e", Map.of("id", 5L, "expression", "password"));
-		assertThat(scan("e2e", "my password is secret-1234")).isEqualTo(new ScanResult("e2e", 2, List.of(5L)));
+		long second = save(Map.of("id", 5L, "expression", "password"));
+		assertThat(second).isEqualTo(first + 1);
+		assertThat(scan("my password is secret-1234")).isEqualTo(new ScanResult(second, List.of(5L)));
 	}
 
 	@Test
 	void rejectsExpressionsHyperscanCannotCompile() {
 		this.client.put()
-			.uri("/api/profiles/bad")
+			.uri("/api/profile")
 			.contentType(MediaType.APPLICATION_JSON)
 			.body(Map.of("patterns", List.of(Map.of("id", 99, "expression", "(unclosed"))))
 			.exchange()
@@ -52,29 +54,34 @@ class HyperscanApiApplicationTests {
 
 	@Test
 	void handlesManyConcurrentScansWhileTheProfileChanges() {
-		save("busy", Map.of("id", 1L, "expression", "needle"));
+		save(Map.of("id", 1L, "expression", "needle"));
 		List<CompletableFuture<ScanResult>> scans = IntStream.range(0, 100)
-			.mapToObj((i) -> CompletableFuture.supplyAsync(() -> scan("busy", "hay needle hay")))
+			.mapToObj((i) -> CompletableFuture.supplyAsync(() -> scan("hay needle hay")))
 			.toList();
-		IntStream.range(0, 10).forEach((i) -> save("busy", Map.of("id", 1L, "expression", "needle")));
+		IntStream.range(0, 10).forEach((i) -> save(Map.of("id", 1L, "expression", "needle")));
 
 		assertThat(scans).allSatisfy((scan) -> assertThat(scan.join().matches()).containsExactly(1L));
 	}
 
+	/** @return the version of the saved profile */
 	@SafeVarargs
-	private void save(String name, Map<String, Object>... patterns) {
-		this.client.put()
-			.uri("/api/profiles/{name}", name)
+	private long save(Map<String, Object>... patterns) {
+		return this.client.put()
+			.uri("/api/profile")
 			.contentType(MediaType.APPLICATION_JSON)
 			.body(Map.of("patterns", List.of(patterns)))
 			.exchange()
 			.expectStatus()
-			.isOk();
+			.isOk()
+			.expectBody(ProfileInfo.class)
+			.returnResult()
+			.getResponseBody()
+			.version();
 	}
 
-	private ScanResult scan(String name, String content) {
+	private ScanResult scan(String content) {
 		return this.client.post()
-			.uri("/api/profiles/{name}/scan", name)
+			.uri("/api/scan")
 			.contentType(MediaType.TEXT_PLAIN)
 			.body(content)
 			.exchange()
