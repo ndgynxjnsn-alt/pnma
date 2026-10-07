@@ -1,10 +1,8 @@
 package com.example.springboot.hyperscan;
 
-import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.sun.jna.Native;
@@ -13,13 +11,14 @@ import com.sun.jna.StringArray;
 import com.sun.jna.ptr.PointerByReference;
 
 /**
- * A compiled block-mode Hyperscan database plus a pool of scratch spaces for it.
+ * A compiled block-mode Hyperscan database.
  *
  * <p>
- * {@link #scan} is thread-safe: each concurrent scan borrows its own scratch space, which is
- * cloned from an otherwise unused prototype on demand, so the pool grows to the peak scan
- * concurrency. {@link #close} must not run concurrently with a scan; callers guarantee this
- * (see {@code ProfileHolder}).
+ * {@link #scan} is thread-safe: every thread scans with its own scratch space, which is kept
+ * in a thread-local and grown by {@code hs_alloc_scratch} whenever a database needs more than
+ * the scratch currently provides, so one scratch serves all databases. Threads that scan
+ * should call {@link #freeThreadScratch()} before they exit. {@link #close} must not run
+ * concurrently with a scan; callers guarantee this (see {@code ProfileHolder}).
  */
 public final class HyperscanDatabase implements AutoCloseable {
 
@@ -32,32 +31,22 @@ public final class HyperscanDatabase implements AutoCloseable {
 
 	}
 
-	// hs_scan invokes the callback synchronously on the calling thread, so a thread-local
-	// collector is enough to route matches back to the right scan. The callback instance must
-	// stay strongly reachable for JNA, hence the static field.
-	private static final ThreadLocal<BitSet> MATCHES = ThreadLocal.withInitial(BitSet::new);
+	private static final ThreadLocal<ThreadState> THREAD_STATE = ThreadLocal.withInitial(ThreadState::new);
 
+	// hs_scan invokes the callback synchronously on the calling thread, so it finds the scan's
+	// match collector in the thread-local. The callback instance must stay strongly reachable
+	// for JNA, hence the static field.
 	private static final HyperscanLibrary.MatchEventHandler COLLECTOR = new MatchCollector();
 
 	private final HyperscanLibrary lib;
 
 	private final Pointer database;
 
-	private final Pointer prototypeScratch;
-
-	private final int patternCount;
-
-	private final ConcurrentLinkedQueue<Pointer> idleScratch = new ConcurrentLinkedQueue<>();
-
-	private final List<Pointer> allScratch = new ArrayList<>();
-
 	private final AtomicBoolean closed = new AtomicBoolean();
 
-	private HyperscanDatabase(HyperscanLibrary lib, Pointer database, Pointer prototypeScratch, int patternCount) {
+	private HyperscanDatabase(HyperscanLibrary lib, Pointer database) {
 		this.lib = lib;
 		this.database = database;
-		this.prototypeScratch = prototypeScratch;
-		this.patternCount = patternCount;
 	}
 
 	public static HyperscanDatabase compile(List<Expression> expressions) {
@@ -90,15 +79,7 @@ public final class HyperscanDatabase implements AutoCloseable {
 			throw toCompileException(lib, error.getValue());
 		}
 		check(rc, "hs_compile_multi");
-
-		Pointer database = db.getValue();
-		PointerByReference scratch = new PointerByReference();
-		rc = lib.hs_alloc_scratch(database, scratch);
-		if (rc != HyperscanLibrary.HS_SUCCESS) {
-			lib.hs_free_database(database);
-			check(rc, "hs_alloc_scratch");
-		}
-		return new HyperscanDatabase(lib, database, scratch.getValue(), count);
+		return new HyperscanDatabase(lib, db.getValue());
 	}
 
 	/** Returns the sorted, distinct indices of all expressions that match {@code data}. */
@@ -106,49 +87,35 @@ public final class HyperscanDatabase implements AutoCloseable {
 		if (this.closed.get()) {
 			throw new IllegalStateException("Database is closed");
 		}
-		Pointer scratch = borrowScratch();
-		BitSet matches = MATCHES.get();
-		matches.clear();
+		ThreadState state = THREAD_STATE.get();
+		// No-op unless this database needs a larger scratch than the thread has so far.
+		check(this.lib.hs_alloc_scratch(this.database, state.scratch), "hs_alloc_scratch");
+		state.matches.clear();
 		try {
-			check(this.lib.hs_scan(this.database, data, data.length, 0, scratch, COLLECTOR, null), "hs_scan");
-			return matches.stream().toArray();
+			check(this.lib.hs_scan(this.database, data, data.length, 0, state.scratch.getValue(), COLLECTOR, null),
+					"hs_scan");
+			return state.matches.stream().toArray();
 		}
 		finally {
-			matches.clear();
-			this.idleScratch.offer(scratch);
+			state.matches.clear();
 		}
 	}
 
-	public int patternCount() {
-		return this.patternCount;
+	/** Frees the calling thread's scratch space, if it has one. */
+	public static void freeThreadScratch() {
+		ThreadState state = THREAD_STATE.get();
+		THREAD_STATE.remove();
+		Pointer scratch = state.scratch.getValue();
+		if (scratch != null) {
+			Hyperscan.lib().hs_free_scratch(scratch);
+		}
 	}
 
 	@Override
 	public void close() {
-		if (!this.closed.compareAndSet(false, true)) {
-			return;
+		if (this.closed.compareAndSet(false, true)) {
+			this.lib.hs_free_database(this.database);
 		}
-		synchronized (this.allScratch) {
-			this.allScratch.forEach(this.lib::hs_free_scratch);
-			this.allScratch.clear();
-		}
-		this.idleScratch.clear();
-		this.lib.hs_free_scratch(this.prototypeScratch);
-		this.lib.hs_free_database(this.database);
-	}
-
-	private Pointer borrowScratch() {
-		Pointer scratch = this.idleScratch.poll();
-		if (scratch != null) {
-			return scratch;
-		}
-		// The prototype is never scanned with, so cloning it cannot race with an in-flight scan.
-		PointerByReference clone = new PointerByReference();
-		check(this.lib.hs_clone_scratch(this.prototypeScratch, clone), "hs_clone_scratch");
-		synchronized (this.allScratch) {
-			this.allScratch.add(clone.getValue());
-		}
-		return clone.getValue();
 	}
 
 	private static PatternCompileException toCompileException(HyperscanLibrary lib, Pointer error) {
@@ -169,11 +136,20 @@ public final class HyperscanDatabase implements AutoCloseable {
 		}
 	}
 
+	private static final class ThreadState {
+
+		/** Starts out as NULL, which makes the first hs_alloc_scratch allocate a new scratch. */
+		final PointerByReference scratch = new PointerByReference();
+
+		final BitSet matches = new BitSet();
+
+	}
+
 	private static final class MatchCollector implements HyperscanLibrary.MatchEventHandler {
 
 		@Override
 		public int invoke(int id, long from, long to, int flags, Pointer context) {
-			MATCHES.get().set(id);
+			THREAD_STATE.get().matches.set(id);
 			return 0;
 		}
 

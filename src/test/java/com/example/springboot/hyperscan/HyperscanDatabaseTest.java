@@ -8,6 +8,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.stream.IntStream;
 
 import com.example.springboot.hyperscan.HyperscanDatabase.Expression;
 import org.junit.jupiter.api.Test;
@@ -63,6 +64,26 @@ class HyperscanDatabaseTest {
 	@Test
 	void rejectsEmptyExpressionList() {
 		assertThatIllegalArgumentException().isThrownBy(() -> HyperscanDatabase.compile(List.of()));
+	}
+
+	@Test
+	void oneThreadScratchServesDatabasesOfDifferentSizes() {
+		String[] many = IntStream.range(0, 500).mapToObj((i) -> "word" + i + "[a-z]{2,8}x").toArray(String[]::new);
+		try (HyperscanDatabase small = compile("foo"); HyperscanDatabase large = compile(many)) {
+			assertThat(small.scan(bytes("foo"))).containsExactly(0);
+			assertThat(large.scan(bytes("word42abcx word499zzx"))).containsExactly(42, 499);
+			assertThat(small.scan(bytes("foo"))).containsExactly(0);
+		}
+	}
+
+	@Test
+	void reallocatesTheThreadScratchAfterItWasFreed() {
+		try (HyperscanDatabase db = compile("foo")) {
+			assertThat(db.scan(bytes("foo"))).containsExactly(0);
+			HyperscanDatabase.freeThreadScratch();
+			HyperscanDatabase.freeThreadScratch();
+			assertThat(db.scan(bytes("foo"))).containsExactly(0);
+		}
 	}
 
 	@Test

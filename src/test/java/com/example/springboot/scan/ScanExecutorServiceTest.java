@@ -14,9 +14,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ScanExecutorServiceTest {
 
 	@Test
-	void defaultConcurrencyIsCoresCappedAtFive() {
-		int cores = Runtime.getRuntime().availableProcessors();
-		assertThat(ScanExecutorService.defaultConcurrency()).isEqualTo(Math.min(cores, 5)).isBetween(1, 5);
+	void defaultConcurrencyIsOneThreadPerCore() {
+		assertThat(ScanExecutorService.defaultConcurrency()).isEqualTo(Runtime.getRuntime().availableProcessors());
 	}
 
 	@Test

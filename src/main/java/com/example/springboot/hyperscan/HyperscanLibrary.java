@@ -25,8 +25,6 @@ interface HyperscanLibrary extends Library {
 
 	int hs_alloc_scratch(Pointer db, PointerByReference scratch);
 
-	int hs_clone_scratch(Pointer src, PointerByReference dest);
-
 	int hs_free_scratch(Pointer scratch);
 
 	int hs_scan(Pointer db, byte[] data, int length, int flags, Pointer scratch, MatchEventHandler onEvent,

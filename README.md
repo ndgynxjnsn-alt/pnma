@@ -45,20 +45,22 @@ Errors are returned as `application/problem+json`:
 
 ## Concurrency
 
-- Scans run on a dedicated pool of `min(CPU cores, 5)` threads (`ScanExecutorService`). Requests are
+- Scans run on a dedicated pool with one thread per CPU core (`ScanExecutorService`). Requests are
   handled asynchronously (`CompletableFuture`). Additional scans wait in an unbounded queue until a
   thread is free.
 - The active database is guarded by a fair `ReentrantReadWriteLock` (`ProfileHolder`).
   Scans hold the read lock. Saving the profile compiles the new database without holding any lock, then
   takes the write lock only to swap the reference. That waits until in-flight scans have finished
   with the old database, which is then freed.
-- Each database keeps a pool of Hyperscan scratch spaces, one per concurrent scan.
+- Each scan thread has one Hyperscan scratch space in a `ThreadLocal`. Before each scan,
+  `hs_alloc_scratch` grows it if the database needs more, so one scratch space serves every database
+  version. Threads free their scratch space when they exit.
 
 ## Configuration
 
 | Property | Default |
 |---|---|
-| `scan.max-concurrency` | `min(cores, 5)` |
+| `scan.max-concurrency` | number of CPU cores |
 | `scan.max-content-bytes` | `16MB` |
 | `-Dhyperscan.library` | tries `hs`, then `libhs.so.5` |
 
@@ -69,3 +71,15 @@ Errors are returned as `application/problem+json`:
 ```
 
 The tests need libhs installed (`apt install libhyperscan5`).
+
+`HyperscanApiStressTests` (about 100 s) drives the HTTP API from up to 48 concurrent clients. While the
+clients scan, the tests swap profiles, save concurrently, submit patterns Hyperscan rejects and send
+edge-case content. Every scan must report exactly the ids that the database version named in its
+response produces. The rule sets in `RuleSets` are built to be hard on Hyperscan:
+
+- literal-free character classes, which scan about 400 times slower than literal patterns;
+- overlapping bounded repeats, which take seconds to compile;
+- Unicode, NUL bytes, ReDoS shapes and ids beyond 2^53.
+
+Surefire runs tests with `GLIBC_TUNABLES=glibc.malloc.perturb=165`. glibc then overwrites freed memory,
+so a scan that uses an already freed database crashes instead of silently returning correct results.

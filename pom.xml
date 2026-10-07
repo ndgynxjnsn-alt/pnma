@@ -49,6 +49,10 @@
 				<artifactId>maven-surefire-plugin</artifactId>
 				<configuration>
 					<argLine>--enable-native-access=ALL-UNNAMED</argLine>
+					<environmentVariables>
+						<!-- glibc overwrites freed memory, so a scan using a freed database fails loudly. -->
+						<GLIBC_TUNABLES>glibc.malloc.perturb=165</GLIBC_TUNABLES>
+					</environmentVariables>
 				</configuration>
 			</plugin>
 		</plugins>

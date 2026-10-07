@@ -5,7 +5,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.util.unit.DataSize;
 
 /**
- * @param maxConcurrency number of scans running in parallel, defaults to {@code min(cores, 5)}
+ * @param maxConcurrency number of scans running in parallel, defaults to the number of available cores
  * @param maxContentBytes largest content accepted for a single scan
  */
 @ConfigurationProperties("scan")
